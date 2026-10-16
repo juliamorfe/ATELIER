@@ -4,7 +4,55 @@ let state={items:[],looks:[]}, view='wardrobe', category='all', selection={}, vi
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const title=s=>s.charAt(0).toUpperCase()+s.slice(1), slot=c=>({tops:'base',dresses:'base',bottoms:'bottom',outerwear:'layer',shoes:'footwear',bags:'bag',accessories:'detail',hats:'headwear'}[c]);
 function toast(message){$('#toast').textContent=message;$('#toast').hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').hidden=true,4200);}
-async function api(url,options={}){const response=await fetch(url,options);if(!response.ok){let message='Something went wrong. Please try again.';try{message=(await response.json()).message||message;}catch{}throw Error(message);}return response.status===204?null:response.json();}
+let csrfToken, registering=false;
+async function getCsrf(){const res=await fetch('/api/auth/csrf');if(!res.ok)throw Error('Cannot connect. Please try again.');csrfToken=await res.json();}
+function showLogin(){
+ state={items:[],looks:[]};selection={};visible=[];
+ for(const id of ['wardrobe','looks','mixer','selected-summary'])$('#'+id).replaceChildren();
+ for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close();
+ $('#upload-form').reset();$('#save-form').reset();$('#auth-password').value='';
+ if(previewUrl){URL.revokeObjectURL(previewUrl);previewUrl=null;}$('#preview').removeAttribute('src');$('#preview').hidden=true;
+ $('#account-email').textContent='';$('#closet-app').hidden=true;$('#auth-panel').hidden=false;
+}
+async function api(url,options={}){
+ const method=(options.method||'GET').toUpperCase();
+ if(!['GET','HEAD'].includes(method)){if(!csrfToken)await getCsrf();options.headers={...options.headers,[csrfToken.headerName]:csrfToken.token};}
+ const response=await fetch(url,options);
+ if(!response.ok){
+  if(response.status===401&&!url.endsWith('/login'))showLogin();
+  if(response.status===403){csrfToken=null;}
+  let message='Something went wrong. Please try again.';try{message=(await response.json()).message||message;}catch{}
+  const error=Error(message);error.status=response.status;throw error;
+ }
+ return response.status===204?null:response.json();
+}
+async function openCloset(){
+ const user=await api('/api/auth/me');
+ $('#account-email').textContent=user.email;
+ category='all';view='wardrobe';selection={};$('#season').value='all';$('#occasion').value='all';$('#search').value='';
+ document.querySelectorAll('[data-category]').forEach(b=>b.classList.toggle('active',b.dataset.category==='all'));
+ await refresh();await setView('wardrobe');$('#loading').hidden=true;
+ $('#auth-panel').hidden=true;$('#closet-app').hidden=false;
+}
+$('#auth-toggle').onclick=()=>{
+ registering=!registering;$('#auth-error').textContent='';$('#auth-password').value='';
+ $('#auth-copy').textContent=registering?'Create an account for your own wardrobe and saved looks.':'Sign in to your personal collection.';
+ $('#auth-submit').textContent=registering?'Create account ↗':'Sign in ↗';
+ $('#auth-toggle').textContent=registering?'Already have an account? Sign in':'New here? Create an account';
+ $('#password-hint').hidden=!registering;$('#auth-password').minLength=registering?12:1;
+ $('#auth-password').autocomplete=registering?'new-password':'current-password';
+};
+$('#auth-form').onsubmit=async e=>{
+ e.preventDefault();$('#auth-submit').disabled=true;$('#auth-toggle').disabled=true;$('#auth-error').textContent='';
+ const email=$('#auth-email').value.trim(),password=$('#auth-password').value;
+ try{
+  await getCsrf();
+  if(registering){await api('/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});$('#auth-toggle').onclick();toast('Account created. Opening your wardrobe…');}
+  await api('/api/auth/login',{method:'POST',body:new URLSearchParams({email,password})});
+  $('#auth-password').value='';await getCsrf();await openCloset();
+ }catch(err){$('#auth-error').textContent=err.message;}finally{$('#auth-submit').disabled=false;$('#auth-toggle').disabled=false;}
+};
+$('#logout').onclick=()=>guarded(async()=>{await api('/api/auth/logout',{method:'POST'});showLogin();await getCsrf();$('#auth-email').focus();});
 function query(){return new URLSearchParams({category,season:$('#season').value,occasion:$('#occasion').value});}
 async function refresh(){state=await api('/api/state');for(const s in selection)if(!state.items.some(i=>i.id===selection[s]))delete selection[s];await render();}
 async function render(){
@@ -50,7 +98,4 @@ $('#upload-form [name=image]').onchange=e=>{const file=e.target.files[0];if(prev
 $('#upload-form').onsubmit=e=>{e.preventDefault();guarded(async()=>{const button=e.target.querySelector('[type=submit]');button.disabled=true;$('#upload-error').textContent='';try{await api('/api/items',{method:'POST',body:new FormData(e.target)});e.target.reset();$('#preview').hidden=true;if(previewUrl)URL.revokeObjectURL(previewUrl);$('#upload-dialog').close();await refresh();toast('Your new piece is in the wardrobe.');}catch(err){$('#upload-error').textContent=err.message;}finally{button.disabled=false;}});};
 function options(values){return values.map(v=>`<option>${esc(v)}</option>`).join('');}
 document.querySelectorAll('.season-options').forEach(s=>s.innerHTML=options(seasons));document.querySelectorAll('.occasion-options').forEach(s=>s.innerHTML=options(occasions));$('#season').insertAdjacentHTML('beforeend',options(seasons));$('#occasion').insertAdjacentHTML('beforeend',options(occasions));$('#upload-category').innerHTML=cats.map(c=>`<option value="${c}">${title(c)}</option>`).join('');$('#categories').innerHTML=['all',...cats].map(c=>`<button data-category="${c}" class="${c==='all'?'active':''}">${c==='all'?'All pieces':title(c)}</button>`).join('');
-guarded(async()=>{try{await refresh();$('#loading').hidden=true;}catch(e){$('#loading').innerHTML='Your wardrobe could not open. Check that the server is running. <button id="retry">Try again</button>';$('#retry').onclick=()=>location.reload();throw e;}});
-
-
-
+guarded(async()=>{try{await getCsrf();await openCloset();}catch(e){if(e.status!==401)$('#auth-error').textContent=e.message;}});
